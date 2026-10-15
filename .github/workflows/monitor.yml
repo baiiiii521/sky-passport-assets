@@ -1,0 +1,42 @@
+# Outside check of the Sky Passport / 航迹手帐 sites, every 10 minutes (this repo is public, so the minutes are free).
+# When something stays down for three tries an issue labelled "down" is opened (GitHub e-mails the owner);
+# it is closed again with a comment when everything answers.
+name: monitor
+on:
+  schedule: [{ cron: '*/10 * * * *' }]
+  workflow_dispatch:
+permissions: { issues: write }
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: check
+        id: check
+        run: |
+          fail=""
+          probe() {  # name url expected-status [text that must appear]
+            for t in 1 2 3; do
+              code=$(curl -s -m 25 -o /tmp/body -w '%{http_code}' "$2")
+              if [ "$code" = "$3" ] && { [ -z "$4" ] || grep -q "$4" /tmp/body; }; then echo "ok   $1"; return; fi
+              sleep 20
+            done
+            echo "FAIL $1 ($2 → $code)"; fail="$fail\n- $1: $2 answered $code"
+          }
+          probe "国内网页" https://passport.nybbq.art/ 200 "航迹手帐"
+          probe "国内接口" https://passport.nybbq.art/api/health 200
+          probe "视频渲染服务" https://passport.nybbq.art/api/video/000000000000000000000000 404 not_found
+          probe "存储桶静态文件" https://sky-passport-1252289725.cos.ap-beijing.myqcloud.com/static/airports.json 200
+          probe "海外网页 (Vercel)" https://sky-passport.vercel.app/ 200
+          { echo "fail<<EOF"; printf "$fail"; echo; echo "EOF"; } >> "$GITHUB_OUTPUT"
+      - name: open or close the issue
+        uses: actions/github-script@v7
+        env: { FAIL: '${{ steps.check.outputs.fail }}' }
+        with:
+          script: |
+            const fail = process.env.FAIL.trim(), { owner, repo } = context.repo;
+            const open = (await github.rest.issues.listForRepo({ owner, repo, state: 'open', labels: 'down' })).data[0];
+            const now = new Date().toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
+            if (fail && !open) await github.rest.issues.create({ owner, repo, title: '航迹手帐：网站或服务没有响应', labels: ['down'], body: `${now} 检查失败：\n\n${fail}\n\n恢复后这个 issue 会自动关闭。` });
+            else if (fail && open) await github.rest.issues.createComment({ owner, repo, issue_number: open.number, body: `${now} 仍然失败：\n\n${fail}` });
+            else if (!fail && open) { await github.rest.issues.createComment({ owner, repo, issue_number: open.number, body: `${now} 已恢复，全部正常。` }); await github.rest.issues.update({ owner, repo, issue_number: open.number, state: 'closed' }); }
